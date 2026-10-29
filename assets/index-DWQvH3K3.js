@@ -4310,6 +4310,8 @@ void main() {
  vWorld = wp.xyz;
  gl_Position = projectionMatrix * viewMatrix * wp;
 }`,yl=`
+// PHOTO_BOOST: how strongly photos show inside round bubbles. 0 = previous version, 1 = strongest.
+const float PHOTO_BOOST=1.0;
 uniform sampler2D uEnvironment;
 uniform sampler2D uPhoto;
 uniform vec4 uPhotoRegion;
@@ -4374,7 +4376,9 @@ void main() {
  vec2 reflectedReach=mix(reflectionAnchor,vec2(1.0)-reflectionAnchor,smoothstep(vec2(-0.08),vec2(0.08),reflectionDisk));
  vec2 positionalScene=reflectionAnchor+reflectionDisk*reflectedReach*0.90;
  vec2 curvedSceneUV=cover(positionalScene,uEnvSize,uWorldViewport.z/max(1.0,uWorldViewport.w));
- vec2 environmentUV=mix(localUV,curvedSceneUV,max(uRound,fullBody));
+ // Round bubbles keep the new curved reflection; post bubbles use the Original's spherical
+ // world reflection for their interior.
+ vec2 environmentUV=mix(localUV,mix(curvedSceneUV,sphericalUV,fullBody),max(uRound,fullBody));
  environmentUV=clamp(environmentUV,vec2(0.001),vec2(0.999));
  vec3 environment=texture2D(uEnvironment,environmentUV).rgb; float thickness = 460.0 + 95.0 * sin(vLocal.y * 3.0 + uTime * 0.18 + uSeed) + 48.0 * vLocal.x;
  vec3 wavelengths = vec3(650.0, 510.0, 475.0);
@@ -4430,6 +4434,12 @@ void main() {
  float sharpSource=smoothstep(0.06,0.65,sharpBrightness);
  vec3 rimReflection=(softLight*broadSource*1.7+sharpLight*sharpSource*0.75)*grazing;
  float rimCoverage=grazing*clamp(broadSource*0.28+sharpSource*0.16,0.0,0.44);
+ // A clear film only adds reflections: it should not be much darker than what is behind it.
+ // Reflecting a wide, dark part of the scene otherwise turns an empty bubble into a dark ball.
+ float orbBody=uRound*(1.0-uHasPhoto)*(1.0-uPicker)*facing*facing;
+ color=mix(color,max(color,sharpLight*0.95),orbBody*0.85);
+ // Outlines need light to catch: fade the film border on dark scenery, keep it on bright scenery.
+ float edgeKeep=mix(0.22,1.0,smoothstep(0.03,0.25,environmentLuminance));
  // Picker worlds sit visually behind a thin film, rather than being washed
  // with a broad reflection across their centers. Keep existing memories intact.
  float thinGrazing=pow(1.0-facing,4.2);
@@ -4440,6 +4450,7 @@ void main() {
    // Fit a memory across the visible hemisphere using spherical coordinates.
    // Features compress toward the sides because the texture follows the film.
    vec3 surface=normalize(vSurfaceDirection);
+   float radius2=dot(surface.xy,surface.xy);
    // A continuous disk-to-square map keeps the image center at natural scale.
    // All four image edges reach the film rim, instead of enlarging the center
    // through angular projection or revealing an inset rectangular panel.
@@ -4456,11 +4467,20 @@ void main() {
      // An inset image plane sits behind the glass. Preserve its proportions:
      // the shell bends the environment, rather than stretching the photograph.
      vec2 interiorUV=surface.xy/0.91;
-     interiorUV*=1.0+0.025*dot(interiorUV,interiorUV);
+     // Look through the sphere: magnified centre, bent toward the rim. The picture shifts with the
+     // film's own curvature (so it shimmers when the bubble is pressed) and drifts very slowly.
+     interiorUV*=mix(mix(0.78,0.86,PHOTO_BOOST),1.04,radius2);
+     interiorUV+=(normal.xy-surface.xy)*0.35+vec2(sin(uTime*0.21+uSeed),cos(uTime*0.17+uSeed*1.7))*0.025;
      uv=cover(interiorUV*0.5+0.5,uPhotoSize,1.0);
+     uv=1.0-abs(1.0-mod(uv,2.0));
    }
    // Map the complete photo edge-to-edge onto the hemisphere, without a cover crop.
    vec3 photo = texture2D(uPhoto, uPhotoRegion.xy+clamp(uv,0.002,0.998)*uPhotoRegion.zw).rgb;
+   if(interiorMemory>0.5){
+     vec2 split=(uv-0.5)*0.016*radius2;
+     photo.r=texture2D(uPhoto,uPhotoRegion.xy+clamp(uv+split,0.002,0.998)*uPhotoRegion.zw).r;
+     photo.b=texture2D(uPhoto,uPhotoRegion.xy+clamp(uv-split,0.002,0.998)*uPhotoRegion.zw).b;
+   }
    // Broad local scenery supplies ambient lighting, independently of the
    // detailed curved reflection. This avoids tint flicker from tiny stars.
    vec2 ambientUV=cover(uEnvironmentAnchor,uEnvSize,uWorldViewport.z/max(1.0,uWorldViewport.w));
@@ -4474,18 +4494,27 @@ void main() {
    float ambientDaylight=smoothstep(0.015,0.40,ambientLuminance);
    vec3 lightTint=clamp((ambient+vec3(0.035))/(ambientLuminance+0.035),vec3(0.60),vec3(1.35));
    float edgeLighting=pow(1.0-facing,1.4);
-   photo*=mix(vec3(1.0),lightTint,mix(0.40+edgeLighting*0.18,edgeLighting*0.08,uPicker));
-   photo*=mix(mix(mix(0.72,0.86,interiorMemory),1.04,ambientDaylight),1.04,uPicker)*(0.96+0.04*facing);
+   photo*=mix(vec3(1.0),lightTint,mix(0.40+edgeLighting*0.18,edgeLighting*0.08,uPicker)*(1.0-0.6*PHOTO_BOOST*interiorMemory));
+   photo*=mix(mix(mix(0.72,0.97+0.10*PHOTO_BOOST,interiorMemory),1.04+0.04*PHOTO_BOOST*interiorMemory,ambientDaylight),1.04,uPicker)*(0.96+0.04*facing);
    float litLuminance=dot(photo,vec3(0.2126,0.7152,0.0722));
-   photo=mix(vec3(litLuminance),photo,mix(mix(0.90,1.0,ambientDaylight),1.0,uPicker));
+   photo=mix(vec3(litLuminance),photo,mix(mix(0.97,1.0,ambientDaylight),1.0,uPicker));
+   if(interiorMemory>0.5){
+     // The world curves away from the light toward the film, with a soft caustic where light
+     // gathers on the far wall (opposite the main glint).
+     photo*=1.0-mix(0.28,0.10,PHOTO_BOOST)*smoothstep(0.40,0.95,sqrt(radius2));
+     float caustic=pow(max(0.0,dot(surface,normalize(vec3(0.52,-0.58,0.63)))),12.0)*smoothstep(0.45,0.88,sqrt(radius2));
+     photo+=photo*caustic*0.45+vec3(0.85,0.92,1.0)*caustic*0.06;
+     photo=mix(vec3(dot(photo,vec3(0.2126,0.7152,0.0722))),photo,1.0+0.12*PHOTO_BOOST);
+   }
    // Protect the image center; let local scenery define the curved outer film.
    float memoryEnvelope=1.0-smoothstep(0.78,0.985,length(surface.xy));
    memoryEnvelope=mix(memoryEnvelope,1.0-smoothstep(0.90,0.998,length(surface.xy)),uPicker);
-   if(interiorMemory>0.5)memoryEnvelope=1.0-smoothstep(0.87,0.998,length(surface.xy));
+   if(interiorMemory>0.5)memoryEnvelope=1.0-smoothstep(mix(0.87,0.93,PHOTO_BOOST),0.998,length(surface.xy));
    float photoLuminance=dot(photo,vec3(0.2126,0.7152,0.0722));
-   float imagePriority=0.87+0.06*smoothstep(0.05,0.65,photoLuminance)-0.025*sceneryLight;
+   float imagePriority=0.92+0.05*smoothstep(0.05,0.65,photoLuminance)-0.02*sceneryLight;
    float memoryWeight=imagePriority*memoryEnvelope*(1.0-0.14*edgeLighting);
    memoryWeight=mix(memoryWeight,0.96*memoryEnvelope,uPicker);
+   memoryWeight=mix(memoryWeight,memoryEnvelope,PHOTO_BOOST*interiorMemory);
    color=mix(color,photo,memoryWeight);
    alpha=mix(alpha,mix(0.84,0.92,uPicker),memoryEnvelope);
  }
@@ -4502,10 +4531,10 @@ void main() {
    if(interiorMemory>0.5){
      // Independent front film: its curved, position-dependent scenery survives
      // across the photo face, with stronger reflections toward grazing angles.
-     imageCoat=0.045+0.09*sceneryLight+0.57*pow(1.0-facing,1.7);
+     imageCoat=(0.02+0.05*sceneryLight)*(1.0-0.5*PHOTO_BOOST)+0.57*pow(1.0-facing,1.9);
      vec3 frontReflection=environment*(1.30+0.50*sceneryLight);
      color=mix(color,frontReflection,imageCoat);
-     alpha=max(alpha,0.82+0.14*fresnel);
+     alpha=max(alpha,0.82+0.10*PHOTO_BOOST+(0.14-0.06*PHOTO_BOOST)*fresnel);
    }else color=mix(color,coatReflection,imageCoat);
  }
  // Add the world reflection over the memory, restricted to grazing film.
@@ -4515,13 +4544,13 @@ void main() {
  float surfaceRadius=length(normalize(vSurfaceDirection).xy);
  float filmEdge=smoothstep(0.985-max(fwidth(surfaceRadius),0.001),0.999,surfaceRadius)*max(uPicker,fullBody);
  vec3 pearlLight=mix(sharpLight,vec3(sharpBrightness),0.28);
- color+=filmEdge*(pearlLight*(0.20+sharpSource*0.40)+film*0.12*broadSource);
- alpha=max(alpha,filmEdge*(0.48+0.30*sharpSource));
+ color+=filmEdge*edgeKeep*(pearlLight*(0.20+sharpSource*0.40)+film*0.12*broadSource);
+ alpha=max(alpha,filmEdge*edgeKeep*(0.48+0.30*sharpSource));
  // Thin-film color follows curvature and varies across the surface.
  float opticalRim=pow(1.0-facing,2.8)*fullBody;
  float filmVariation=0.35+0.65*pow(0.5+0.5*sin(vLocal.y*5.0+vLocal.x*3.0+uSeed),2.0);
- color+=interference*opticalRim*filmVariation*0.19;
- color+=vec3(0.16,0.20,0.27)*opticalRim*0.22;
+ color+=interference*opticalRim*filmVariation*0.19*mix(0.5,1.0,edgeKeep);
+ color+=vec3(0.16,0.20,0.27)*opticalRim*0.22*mix(0.5,1.0,edgeKeep);
  vec3 ambientPearl=mix(vec3(0.21,0.24,0.32),softLight,0.30);
  float ambientCurve=pow(1.0-facing,1.5);
  color+=ambientPearl*(0.035+0.16*ambientCurve)*fullBody*smoothstep(0.008,0.085,environmentLuminance);
@@ -4542,7 +4571,7 @@ void main() {
    float envLuma=dot(softLight,vec3(0.2126,0.7152,0.0722));
    vec3 environmentTint=clamp((softLight+0.05)/(envLuma+0.05),0.65,1.3);
    rainbow*=mix(vec3(1.0),environmentTint,0.23);
-   color+=rainbow*(filmBand*(0.09+arcs*0.50)+fineEdge*(0.10+arcs*0.65));
+   color+=rainbow*(filmBand*(0.09+arcs*0.50)+fineEdge*(0.10+arcs*0.65))*edgeKeep;
    vec3 dome=normalize(mix(normal,normalize(vSurfaceDirection),0.65));
    float glintA=pow(max(0.0,dot(dome,normalize(vec3(-0.46,0.68,0.57)))),260.0);
    float glintB=pow(max(0.0,dot(dome,normalize(vec3(-0.63,0.54,0.56)))),430.0);
@@ -4550,7 +4579,7 @@ void main() {
    float softSheen=pow(max(0.0,dot(dome,normalize(vec3(-0.38,0.64,0.67)))),38.0);
    float glints=glintA+glintB*0.65+glintC*0.55;
    color+=vec3(0.88,0.91,1.0)*(glints*1.65+softSheen*0.10);
-   alpha=max(alpha,max(glints*0.95,fineEdge*(0.44+arcs*0.44)));
+   alpha=max(alpha,max(glints*0.95,fineEdge*(0.44+arcs*0.44)*edgeKeep));
  }
  if(fullBody>0.5){
    // A broad clear collar and a finer silver line describe the film thickness.
@@ -4585,7 +4614,7 @@ void main() {
  gl_FragColor = vec4(color, clamp(alpha,0.0,mix(0.96,0.98,uTextSurface))*uFaceOpacity);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
-}`;function bl({scope:e,container:t,getEnvironment:n,dialog:r=!1,memoryOnly:i=!1}){r||document.body.classList.remove(`webgl-fallback`);let a;try{a=new dl({alpha:!0,antialias:!0,powerPreference:`low-power`})}catch{return document.body.classList.add(`webgl-fallback`),{dispose(){}}}a.debug.onShaderError=(e,t,n,r)=>{document.body.classList.add(`webgl-fallback`),console.error(`Bubble shader failed to compile`,e.getShaderInfoLog(n),e.getShaderInfoLog(r))},a.setClearColor(0,0),a.setPixelRatio(Math.min(devicePixelRatio,2)),a.domElement.className=i?`bubble-canvas memory-canvas`:`bubble-canvas`,a.domElement.setAttribute(`aria-hidden`,`true`),t.prepend(a.domElement);let o=new rr,s=new ka;s.position.z=1e3,s.near=.1,s.far=2e3;let c=new Ii(1,32,24),l=new Ii(1,112,80),u=new ba,d=new Map,f=new Map,p=new wi(new Uint8Array([100,110,150,255]),1,1);p.needsUpdate=!0;let m=null,h=null,g=0,_=performance.now(),v=!1,y=e=>{if(!e)return p;if(!d.has(e)){let t=u.load(e);t.colorSpace=st,t.anisotropy=Math.min(8,a.capabilities.getMaxAnisotropy()),d.set(e,t)}return d.get(e)};function b(e,t,n){return new Gi({vertexShader:vl,fragmentShader:yl,transparent:!0,depthWrite:!1,side:0,uniforms:{uTime:{value:0},uRound:{value:+!!e},uSeed:{value:t},uImpulse:{value:0},uPress:{value:0},uPop:{value:0},uTension:{value:0},uTouch:{value:new K},uDrag:{value:new K},uContactPlanes:{value:Array.from({length:15},()=>new hn)},uPlaneCount:{value:0},uEnvironment:{value:p},uPhoto:{value:p},uPhotoRegion:{value:new hn(0,0,1,1)},uFaceOpacity:{value:1},uPicker:{value:0},uHasPhoto:{value:0},uTextSurface:{value:0},uPost:{value:+!!n},uScreen:{value:new K},uWorldViewport:{value:new hn},uEnvSize:{value:new K(1,1)},uEnvironmentAnchor:{value:new K(.5,.5)},uPhotoSize:{value:new K(1,1)},uClip:{value:new hn},uPointer:{value:new K(3,3)},uHover:{value:0}}})}let x=i?`.user-orb, .dm-orb, .dm-world-memory`:r?`.message`:`.memory-bubble, .reply-glass, .reply-form, .filter, .header-tools .round, .chip, .world-nav, footer button, .dm-chat-surface, .dm-scene-avatar, .dm-scene-control`;function S(){let t=new Set(e.querySelectorAll(x));for(let[e,n]of f)t.has(e)||(o.remove(n.mesh),n.mesh.material.dispose(),n.photoVideoTexture?.dispose(),f.delete(e));for(let e of t)if(!f.has(e)){let t=Number(e.dataset.lightingSeed??Math.random()*6);e.dataset.lightingSeed=String(t);let n=b(e.classList.contains(`user-orb`)||e.classList.contains(`dm-orb`)||e.classList.contains(`dm-world-memory`)||e.classList.contains(`dm-scene-avatar`)||e.classList.contains(`dm-scene-control`)||e.classList.contains(`round`)||e.classList.contains(`world-nav`),t,e.classList.contains(`memory-bubble`)),r=new xi(l,n);r.frustumCulled=!1,f.set(e,{mesh:r,state:{displacement:0,velocity:0},growing:e.classList.contains(`growing`)}),o.add(r)}}let C=new MutationObserver(S);C.observe(e,{childList:!0,subtree:!0}),S();let w={x:-1e4,y:-1e4},T=e=>{w.x=e.clientX,w.y=e.clientY},E=()=>{w.x=w.y=-1e4};e.addEventListener(`pointermove`,T),e.addEventListener(`pointerleave`,E);let D=e=>{let t=e.target.closest(x),n=f.get(t);if(n){let r=t.getBoundingClientRect();n.mesh.material.uniforms.uTouch.value.set((e.clientX-r.left)/r.width*2-1,1-(e.clientY-r.top)/r.height*2),n.state.velocity=2.8,n.held=!0,n.pressStarted=performance.now()}};e.addEventListener(`pointerdown`,D);let O=()=>{for(let e of f.values())e.held&&(e.state.velocity+=performance.now()-(e.pressStarted||0)<250?1.1:-.8*(e.pressDepth||0)),e.held=!1};e.addEventListener(`pointerup`,O),e.addEventListener(`pointercancel`,O),e.addEventListener(`lostpointercapture`,O),window.addEventListener(`blur`,O),a.domElement.addEventListener(`webglcontextlost`,e=>{e.preventDefault(),document.body.classList.add(`webgl-fallback`)});let k=0;function A(u){if(v)return;g=requestAnimationFrame(A);let p=!!document.querySelector(`#app[data-memory-watching]`);if(document.hidden||p&&!document.querySelector(`#app[data-sky-travelling]`)&&!i&&!r||p&&u-k<32)return;k=u;let b=Math.min(devicePixelRatio,p?1.25:2);a.getPixelRatio()!==b&&a.setPixelRatio(b);let x=n(),S=Math.min((u-_)/1e3,1/30);if(_=u,r&&!e.open)return;let C=r?t.getBoundingClientRect():{left:0,top:0,width:innerWidth,height:innerHeight},T=Math.max(1,C.width),E=Math.max(1,C.height);(a.domElement.width!==Math.round(T*a.getPixelRatio())||a.domElement.height!==Math.round(E*a.getPixelRatio()))&&(a.setSize(T,E,!1),s.left=0,s.right=T,s.top=E,s.bottom=0,s.updateProjectionMatrix());let D=y(x.background);x.video&&x.video!==h&&(m?.dispose(),h=x.video,m=new ki(h),m.colorSpace=st),!x.video&&h&&(m?.dispose(),m=null,h=null),m&&(D=m);let O=D.image||{};for(let[e,t]of f){let n=e.getBoundingClientRect(),r=n.left-C.left,i=n.top-C.top,o=n.width>0&&n.height>0&&i+n.height>0&&i<E&&r+n.width>0&&r<T,s=!!e.closest(`.shared-dm-world`)||e.classList.contains(`dm-entry-orb`);if(t.mesh.visible=o&&e.dataset.entrySuppressed!==`1`&&(e.classList.contains(`dm-entry-orb`)||(x.dm?s:!s)),!t.mesh.visible)continue;t.mesh.renderOrder=e.classList.contains(`watch-orb`)&&Number(e.style.zIndex)||0,t.mesh.geometry=e.classList.contains(`watch-orb`)&&n.width<200?c:l;let d=t.mesh.material.uniforms;d.uTextSurface.value=+!!e.classList.contains(`dm-chat-surface`),d.uFaceOpacity.value=Number(e.closest(`.social-face`)?.dataset.faceOpacity??1),d.uPicker.value=!e.classList.contains(`watch-orb`)&&e.matches(`.dm-world-memory,.dm-chat-surface,.dm-scene-avatar,.dm-scene-control`)?1:0;let f=(e.dataset.photoRegion||`0,0,1,1`).split(`,`).map(Number);d.uPhotoRegion.value.set(...f),e.classList.contains(`dm-entry-orb`)&&(d.uFaceOpacity.value*=Number(getComputedStyle(e).opacity));let p=w.x>=n.left&&w.x<=n.right&&w.y>=n.top&&w.y<=n.bottom;d.uHover.value+=(Number(p)-d.uHover.value)*.12,d.uPointer.value.set((w.x-n.left)/n.width*2-1,1-(w.y-n.top)/n.height*2);let m=e.classList.contains(`user-orb`),h=x.paused?0:u/1e3,g=e.classList.contains(`growing`);t.growing&&!g&&(t.state.velocity=.8),t.growing=g,ml(t.state,S);let _=m&&!x.paused&&Number(e.dataset.contactStrength||0)<.1?Math.sin(h*.65+d.uSeed.value)*3:0,v=e.classList.contains(`watch-orb`);t.mesh.position.set(r+n.width/2,E-i-n.height/2+_,v?-Math.min(650,Number(e.dataset.skyDepth||0)*.25):0),t.mesh.rotation.set(v?Number(e.dataset.skyPitch||0):0,v?Number(e.dataset.skyYaw||0):0,0),t.mesh.scale.set(n.width/2*1.018,n.height/2*1.025,Math.min(n.width,n.height)/2);let b=Number(e.dataset.pressure||0);t.lastPressure=b,d.uTension.value+=(b-d.uTension.value)*.18,t.pressDepth=(t.pressDepth||0)+((t.held?.65+b*.55:0)-(t.pressDepth||0))*.22,d.uPress.value=t.pressDepth,d.uDrag.value.lerp(new K(Number(e.dataset.dragX||0),Number(e.dataset.dragY||0)),.18),d.uPop.value=e.classList.contains(`popping`)?Math.min(1,(u-Number(e.dataset.popAt||u))/280):0;let k=(e._bubbleContacts||[]).filter(e=>e.isConnected).slice(0,15);d.uPlaneCount.value=k.length;let A=r+n.width/2,j=E-i-n.height/2;for(let t=0;t<k.length;t++){let r=k[t].getBoundingClientRect(),i=r.left-C.left+r.width/2,a=E-(r.top-C.top)-r.height/2,o=i-A,s=a-j,c=Math.hypot(o,s);c<.001&&(o=e.dataset.bubbleId<k[t].dataset.bubbleId?1:-1,s=0,c=1),o/c,s/c;let l=n.width/2*1.018,u=r.width/2*1.018,f=_l(A,j,l,A+o,j+s,u);d.uContactPlanes.value[t].set(f.x,f.y,f.offset,0)}let M=Number(e.dataset.releaseKick||0);M&&M!==t.releaseKick&&(t.releaseKick=M,t.state.velocity=2);let N=a.getPixelRatio();d.uWorldViewport.value.set(C.left*N,(innerHeight-C.top-E)*N,innerWidth*N,innerHeight*N),d.uEnvironmentAnchor.value.set((n.left+n.width/2)/Math.max(1,innerWidth),1-(n.top+n.height/2-_)/Math.max(1,innerHeight)),d.uTime.value=h,d.uImpulse.value=t.state.displacement+Number(e.dataset.skySqueeze||0)*Math.sin(u*.022),d.uEnvironment.value=D,d.uScreen.value.set(T*a.getPixelRatio(),E*a.getPixelRatio()),d.uEnvSize.value.set(O.videoWidth||O.width||1,O.videoHeight||O.height||1);let P=e.closest(`.message-log, .bubble-garden, .dm-scene-log`)?.getBoundingClientRect()||{left:C.left,top:C.top,right:C.left+T,bottom:C.top+E},F=a.getPixelRatio();d.uClip.value.set(Math.max(0,P.left-C.left)*F,Math.max(0,E-(P.bottom-C.top))*F,Math.min(T,P.right-C.left)*F,Math.min(E,E-(P.top-C.top))*F);let I=e._bubbleVideo;I!==t.photoVideoElement&&(t.photoVideoTexture?.dispose(),t.photoVideoTexture=null,t.photoVideoElement=I,I&&(t.photoVideoTexture=new ki(I),t.photoVideoTexture.colorSpace=st));let L=I&&I.readyState>=2?t.photoVideoTexture:y(e.dataset.image);d.uHasPhoto.value=I&&I.readyState>=2||e.dataset.image?1:0,d.uPhoto.value=L,d.uPhotoSize.value.set(L.image?.videoWidth||L.image?.width||1,L.image?.videoHeight||L.image?.height||1)}let j=new Set([...f.keys()].map(e=>e.dataset.image).filter(Boolean));for(let[e,t]of d)e.startsWith(`blob:`)&&!j.has(e)&&e!==x.background&&(t.dispose(),d.delete(e));a.render(o,s)}return g=requestAnimationFrame(A),{dispose(){v=!0,cancelAnimationFrame(g),C.disconnect(),e.removeEventListener(`pointerdown`,D),e.removeEventListener(`pointerup`,O),e.removeEventListener(`pointercancel`,O),e.removeEventListener(`lostpointercapture`,O),window.removeEventListener(`blur`,O),e.removeEventListener(`pointermove`,T),e.removeEventListener(`pointerleave`,E);for(let e of f.values())e.mesh.material.dispose(),e.photoVideoTexture?.dispose();c.dispose(),l.dispose();for(let e of d.values())e.dispose();m?.dispose(),p.dispose(),a.dispose(),a.domElement.remove()}}}var xl=`
+}`;function bl({scope:e,container:t,getEnvironment:n,dialog:r=!1,memoryOnly:i=!1}){r||document.body.classList.remove(`webgl-fallback`);let a;try{a=new dl({alpha:!0,antialias:!0,powerPreference:`low-power`})}catch{return document.body.classList.add(`webgl-fallback`),{dispose(){}}}a.debug.onShaderError=(e,t,n,r)=>{document.body.classList.add(`webgl-fallback`),console.error(`Bubble shader failed to compile`,e.getShaderInfoLog(n),e.getShaderInfoLog(r))},a.setClearColor(0,0),a.setPixelRatio(Math.min(devicePixelRatio,1.5)),a.domElement.className=i?`bubble-canvas memory-canvas`:`bubble-canvas`,a.domElement.setAttribute(`aria-hidden`,`true`),t.prepend(a.domElement);let o=new rr,s=new ka;s.position.z=1e3,s.near=.1,s.far=2e3;let c=new Ii(1,32,24),l=new Ii(1,72,52),u=new ba,d=new Map,f=new Map,p=new wi(new Uint8Array([100,110,150,255]),1,1);p.needsUpdate=!0;let m=null,h=null,g=0,_=performance.now(),v=!1,y=e=>{if(!e)return p;if(!d.has(e)){let t=u.load(e);t.colorSpace=st,t.anisotropy=Math.min(8,a.capabilities.getMaxAnisotropy()),d.set(e,t)}return d.get(e)};function b(e,t,n){return new Gi({vertexShader:vl,fragmentShader:yl,transparent:!0,depthWrite:!1,side:0,uniforms:{uTime:{value:0},uRound:{value:+!!e},uSeed:{value:t},uImpulse:{value:0},uPress:{value:0},uPop:{value:0},uTension:{value:0},uTouch:{value:new K},uDrag:{value:new K},uContactPlanes:{value:Array.from({length:15},()=>new hn)},uPlaneCount:{value:0},uEnvironment:{value:p},uPhoto:{value:p},uPhotoRegion:{value:new hn(0,0,1,1)},uFaceOpacity:{value:1},uPicker:{value:0},uHasPhoto:{value:0},uTextSurface:{value:0},uPost:{value:+!!n},uScreen:{value:new K},uWorldViewport:{value:new hn},uEnvSize:{value:new K(1,1)},uEnvironmentAnchor:{value:new K(.5,.5)},uPhotoSize:{value:new K(1,1)},uClip:{value:new hn},uPointer:{value:new K(3,3)},uHover:{value:0}}})}let x=i?`.user-orb, .dm-orb, .dm-world-memory`:r?`.message`:`.memory-bubble, .reply-glass, .reply-form, .filter, .header-tools .round, .chip, .world-nav, footer button, .dm-chat-surface, .dm-scene-avatar, .dm-scene-control`;function S(){let t=new Set(e.querySelectorAll(x));for(let[e,n]of f)t.has(e)||(o.remove(n.mesh),n.mesh.material.dispose(),n.photoVideoTexture?.dispose(),f.delete(e));for(let e of t)if(!f.has(e)){let t=Number(e.dataset.lightingSeed??Math.random()*6);e.dataset.lightingSeed=String(t);let n=b(e.classList.contains(`user-orb`)||e.classList.contains(`dm-orb`)||e.classList.contains(`dm-world-memory`)||e.classList.contains(`dm-scene-avatar`)||e.classList.contains(`dm-scene-control`)||e.classList.contains(`round`)||e.classList.contains(`world-nav`),t,e.classList.contains(`memory-bubble`)),r=new xi(l,n);r.frustumCulled=!1,f.set(e,{mesh:r,state:{displacement:0,velocity:0},growing:e.classList.contains(`growing`)}),o.add(r)}}let C=new MutationObserver(S);C.observe(e,{childList:!0,subtree:!0}),S();let w={x:-1e4,y:-1e4},T=e=>{w.x=e.clientX,w.y=e.clientY},E=()=>{w.x=w.y=-1e4};e.addEventListener(`pointermove`,T),e.addEventListener(`pointerleave`,E);let D=e=>{let t=e.target.closest(x),n=f.get(t);if(n){let r=t.getBoundingClientRect();n.mesh.material.uniforms.uTouch.value.set((e.clientX-r.left)/r.width*2-1,1-(e.clientY-r.top)/r.height*2),n.state.velocity=2.8,n.held=!0,n.pressStarted=performance.now()}};e.addEventListener(`pointerdown`,D);let O=()=>{for(let e of f.values())e.held&&(e.state.velocity+=performance.now()-(e.pressStarted||0)<250?1.1:-.8*(e.pressDepth||0)),e.held=!1};e.addEventListener(`pointerup`,O),e.addEventListener(`pointercancel`,O),e.addEventListener(`lostpointercapture`,O),window.addEventListener(`blur`,O),a.domElement.addEventListener(`webglcontextlost`,e=>{e.preventDefault(),document.body.classList.add(`webgl-fallback`)});let k=0;function A(u){if(v)return;g=requestAnimationFrame(A);let p=!!document.querySelector(`#app[data-memory-watching]`);if(document.hidden||p&&!document.querySelector(`#app[data-sky-travelling]`)&&!i&&!r||p&&u-k<32)return;k=u;let b=Math.min(devicePixelRatio,p?1.25:1.5);a.getPixelRatio()!==b&&a.setPixelRatio(b);let x=n(),S=Math.min((u-_)/1e3,1/30);if(_=u,r&&!e.open)return;let C=r?t.getBoundingClientRect():{left:0,top:0,width:innerWidth,height:innerHeight},T=Math.max(1,C.width),E=Math.max(1,C.height);(a.domElement.width!==Math.round(T*a.getPixelRatio())||a.domElement.height!==Math.round(E*a.getPixelRatio()))&&(a.setSize(T,E,!1),s.left=0,s.right=T,s.top=E,s.bottom=0,s.updateProjectionMatrix());let D=y(x.background);x.video&&x.video!==h&&(m?.dispose(),h=x.video,m=new ki(h),m.colorSpace=st),!x.video&&h&&(m?.dispose(),m=null,h=null),m&&(D=m);let O=D.image||{};for(let[e,t]of f){let n=e.getBoundingClientRect(),r=n.left-C.left,i=n.top-C.top,o=n.width>0&&n.height>0&&i+n.height>0&&i<E&&r+n.width>0&&r<T,s=!!e.closest(`.shared-dm-world`)||e.classList.contains(`dm-entry-orb`);if(t.mesh.visible=o&&e.dataset.entrySuppressed!==`1`&&(e.classList.contains(`dm-entry-orb`)||(x.dm?s:!s)),!t.mesh.visible)continue;t.mesh.renderOrder=e.classList.contains(`watch-orb`)&&Number(e.style.zIndex)||0,t.mesh.geometry=e.classList.contains(`watch-orb`)&&n.width<200?c:l;let d=t.mesh.material.uniforms;d.uTextSurface.value=+!!e.classList.contains(`dm-chat-surface`),d.uFaceOpacity.value=Number(e.closest(`.social-face`)?.dataset.faceOpacity??1),d.uPicker.value=!e.classList.contains(`watch-orb`)&&e.matches(`.dm-world-memory,.dm-chat-surface,.dm-scene-avatar,.dm-scene-control`)?1:0;let f=(e.dataset.photoRegion||`0,0,1,1`).split(`,`).map(Number);d.uPhotoRegion.value.set(...f),e.classList.contains(`dm-entry-orb`)&&(d.uFaceOpacity.value*=Number(getComputedStyle(e).opacity));let p=w.x>=n.left&&w.x<=n.right&&w.y>=n.top&&w.y<=n.bottom;d.uHover.value+=(Number(p)-d.uHover.value)*.12,d.uPointer.value.set((w.x-n.left)/n.width*2-1,1-(w.y-n.top)/n.height*2);let m=e.classList.contains(`user-orb`),h=x.paused?0:u/1e3,g=e.classList.contains(`growing`);t.growing&&!g&&(t.state.velocity=.8),t.growing=g,ml(t.state,S);let _=m&&!x.paused&&Number(e.dataset.contactStrength||0)<.1?Math.sin(h*.65+d.uSeed.value)*3:0,v=e.classList.contains(`watch-orb`);t.mesh.position.set(r+n.width/2,E-i-n.height/2+_,v?-Math.min(650,Number(e.dataset.skyDepth||0)*.25):0),t.mesh.rotation.set(v?Number(e.dataset.skyPitch||0):0,v?Number(e.dataset.skyYaw||0):0,0),t.mesh.scale.set(n.width/2*1.018,n.height/2*1.025,Math.min(n.width,n.height)/2);let b=Number(e.dataset.pressure||0);t.lastPressure=b,d.uTension.value+=(b-d.uTension.value)*.18,t.pressDepth=(t.pressDepth||0)+((t.held?.65+b*.55:0)-(t.pressDepth||0))*.22,d.uPress.value=t.pressDepth,d.uDrag.value.lerp(new K(Number(e.dataset.dragX||0),Number(e.dataset.dragY||0)),.18),d.uPop.value=e.classList.contains(`popping`)?Math.min(1,(u-Number(e.dataset.popAt||u))/280):0;let k=(e._bubbleContacts||[]).filter(e=>e.isConnected).slice(0,15);d.uPlaneCount.value=k.length;let A=r+n.width/2,j=E-i-n.height/2;for(let t=0;t<k.length;t++){let r=k[t].getBoundingClientRect(),i=r.left-C.left+r.width/2,a=E-(r.top-C.top)-r.height/2,o=i-A,s=a-j,c=Math.hypot(o,s);c<.001&&(o=e.dataset.bubbleId<k[t].dataset.bubbleId?1:-1,s=0,c=1),o/c,s/c;let l=n.width/2*1.018,u=r.width/2*1.018,f=_l(A,j,l,A+o,j+s,u);d.uContactPlanes.value[t].set(f.x,f.y,f.offset,0)}let M=Number(e.dataset.releaseKick||0);M&&M!==t.releaseKick&&(t.releaseKick=M,t.state.velocity=2);let N=a.getPixelRatio();d.uWorldViewport.value.set(C.left*N,(innerHeight-C.top-E)*N,innerWidth*N,innerHeight*N),d.uEnvironmentAnchor.value.set((n.left+n.width/2)/Math.max(1,innerWidth),1-(n.top+n.height/2-_)/Math.max(1,innerHeight)),d.uTime.value=h,d.uImpulse.value=t.state.displacement+Number(e.dataset.skySqueeze||0)*Math.sin(u*.022),d.uEnvironment.value=D,d.uScreen.value.set(T*a.getPixelRatio(),E*a.getPixelRatio()),d.uEnvSize.value.set(O.videoWidth||O.width||1,O.videoHeight||O.height||1);let P=e.closest(`.message-log, .bubble-garden, .dm-scene-log`)?.getBoundingClientRect()||{left:C.left,top:C.top,right:C.left+T,bottom:C.top+E},F=a.getPixelRatio();d.uClip.value.set(Math.max(0,P.left-C.left)*F,Math.max(0,E-(P.bottom-C.top))*F,Math.min(T,P.right-C.left)*F,Math.min(E,E-(P.top-C.top))*F);let I=e._bubbleVideo;I!==t.photoVideoElement&&(t.photoVideoTexture?.dispose(),t.photoVideoTexture=null,t.photoVideoElement=I,I&&(t.photoVideoTexture=new ki(I),t.photoVideoTexture.colorSpace=st));let L=I&&I.readyState>=2?t.photoVideoTexture:y(e.dataset.image);d.uHasPhoto.value=I&&I.readyState>=2||e.dataset.image?1:0,d.uPhoto.value=L,d.uPhotoSize.value.set(L.image?.videoWidth||L.image?.width||1,L.image?.videoHeight||L.image?.height||1)}let j=new Set([...f.keys()].map(e=>e.dataset.image).filter(Boolean));for(let[e,t]of d)e.startsWith(`blob:`)&&!j.has(e)&&e!==x.background&&(t.dispose(),d.delete(e));a.render(o,s)}return g=requestAnimationFrame(A),{dispose(){v=!0,cancelAnimationFrame(g),C.disconnect(),e.removeEventListener(`pointerdown`,D),e.removeEventListener(`pointerup`,O),e.removeEventListener(`pointercancel`,O),e.removeEventListener(`lostpointercapture`,O),window.removeEventListener(`blur`,O),e.removeEventListener(`pointermove`,T),e.removeEventListener(`pointerleave`,E);for(let e of f.values())e.mesh.material.dispose(),e.photoVideoTexture?.dispose();c.dispose(),l.dispose();for(let e of d.values())e.dispose();m?.dispose(),p.dispose(),a.dispose(),a.domElement.remove()}}}var xl=`
 uniform float uTime;
 uniform float uPicker;
 uniform float uTextSurface;
